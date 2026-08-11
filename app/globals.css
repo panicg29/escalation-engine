@@ -1,8 +1,41 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #e6e7eb;
+  --foreground: #1a1b1f;
+}
+
+.sentinel-theme {
+  --sentinel-bg: #e6e7eb;
+  --sentinel-surface: #ececf0;
+  --sentinel-surface-raised: #f0f1f4;
+  --sentinel-surface-inset: #e4e5ea;
+  --sentinel-surface-hover: #dcdee4;
+  --sentinel-border: #d1d3da;
+  --sentinel-border-subtle: #d8dae0;
+  --sentinel-text: #1a1b1f;
+  --sentinel-text-secondary: #52555e;
+  --sentinel-text-muted: #6b6e78;
+  --sentinel-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+.sentinel-theme.dark {
+  --background: #09090b;
+  --foreground: #fafafa;
+  --sentinel-bg: #09090b;
+  --sentinel-surface: #131316;
+  --sentinel-surface-raised: #1c1c21;
+  --sentinel-surface-inset: #18181b;
+  --sentinel-surface-hover: #27272a;
+  --sentinel-border: #2e2e35;
+  --sentinel-border-subtle: #27272a;
+  --sentinel-text: #f4f4f5;
+  --sentinel-text-secondary: #a1a1aa;
+  --sentinel-text-muted: #71717a;
+  --sentinel-shadow: none;
 }
 
 @theme inline {
@@ -12,15 +45,105 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* ── Surfaces ── */
+.sentinel-card {
+  background-color: var(--sentinel-surface-raised);
+  border: 1px solid var(--sentinel-border);
+  box-shadow: var(--sentinel-shadow);
+}
+
+.sentinel-card-inset {
+  background-color: var(--sentinel-surface-inset);
+  border: 1px solid var(--sentinel-border-subtle);
+}
+
+.sentinel-panel {
+  background-color: var(--sentinel-surface-raised);
+  border: 1px solid var(--sentinel-border);
+  box-shadow: var(--sentinel-shadow);
+}
+
+.sentinel-sidebar {
+  background-color: color-mix(in srgb, var(--sentinel-surface) 92%, transparent);
+  border-color: var(--sentinel-border);
+}
+
+/* ── Typography ── */
+.sentinel-text-primary {
+  color: var(--sentinel-text);
+}
+
+.sentinel-text-secondary {
+  color: var(--sentinel-text-secondary);
+}
+
+.sentinel-text-muted {
+  color: var(--sentinel-text-muted);
+}
+
+/* ── Interactive ── */
+.sentinel-tab-active {
+  background-color: var(--sentinel-surface-inset);
+  border: 1px solid var(--sentinel-border);
+}
+
+.sentinel-hover:hover {
+  background-color: var(--sentinel-surface-hover);
+}
+
+.sentinel-input {
+  background-color: var(--sentinel-surface-inset);
+  border: 1px solid var(--sentinel-border);
+  color: var(--sentinel-text);
+}
+
+.sentinel-input::placeholder {
+  color: var(--sentinel-text-muted);
+}
+
+.sentinel-input:focus {
+  border-color: color-mix(in srgb, #8b5cf6 50%, var(--sentinel-border));
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #8b5cf6 18%, transparent);
+}
+
+.sentinel-table-head {
+  background-color: var(--sentinel-surface-inset);
+  border-color: var(--sentinel-border);
+  color: var(--sentinel-text-muted);
+}
+
+.sentinel-divider {
+  border-color: var(--sentinel-border);
+}
+
+.sentinel-btn-ghost {
+  border: 1px solid var(--sentinel-border);
+  background-color: var(--sentinel-surface-raised);
+  color: var(--sentinel-text-secondary);
+}
+
+.sentinel-btn-ghost:hover {
+  border-color: color-mix(in srgb, var(--sentinel-border) 60%, #8b5cf6);
+  color: var(--sentinel-text);
+  background-color: var(--sentinel-surface-hover);
+}
+
+.sentinel-table-divide > :not([hidden]) ~ :not([hidden]) {
+  border-top: 1px solid var(--sentinel-border-subtle);
+}
+
+.sentinel-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+}
+
+.sentinel-range::-moz-range-thumb {
+  border: none;
+  background: transparent;
 }
