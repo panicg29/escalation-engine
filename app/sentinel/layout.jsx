@@ -1,6 +1,8 @@
 import { ThemeProvider } from "@/components/sentinel/ThemeProvider";
 import { SentinelThemeRoot } from "@/components/sentinel/SentinelThemeRoot";
 import { WorkspaceProvider } from "@/lib/sentinel/workspaceContext";
+import { AppHeader } from "@/components/sentinel/AppHeader";
+import { SentinelPersistentSilk } from "@/components/sentinel/SentinelSilkBackground";
 
 export const metadata = {
   title: "Escalation Engine",
@@ -11,7 +13,11 @@ export default function SentinelAppLayout({ children }) {
   return (
     <ThemeProvider>
       <SentinelThemeRoot>
-        <WorkspaceProvider>{children}</WorkspaceProvider>
+        <WorkspaceProvider>
+          <AppHeader />
+          <SentinelPersistentSilk />
+          {children}
+        </WorkspaceProvider>
       </SentinelThemeRoot>
     </ThemeProvider>
   );

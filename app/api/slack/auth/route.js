@@ -4,25 +4,74 @@ import { resolveSlackUserName } from "@/lib/slack/resolveUser";
 export const dynamic = "force-dynamic";
 
 /**
- * Public app base (ngrok in local/dev). Used for OAuth redirect_uri and return URLs.
+ * Origin of this HTTP request (localhost or the public tunnel).
  */
-function getAppBaseUrl(request) {
-  const fromEnv =
-    process.env.NEXT_PUBLIC_SLACK_OAUTH_ORIGIN ||
-    process.env.NEXT_PUBLIC_APP_URL ||
-    process.env.APP_URL;
-  if (fromEnv) return fromEnv.replace(/\/$/, "");
-
-  const proto = request.headers.get("x-forwarded-proto") || "http";
-  const host = request.headers.get("x-forwarded-host") || request.headers.get("host");
+function getRequestOrigin(request) {
+  const proto =
+    request.headers.get("x-forwarded-proto") ||
+    request.nextUrl.protocol.replace(":", "") ||
+    "http";
+  const host =
+    request.headers.get("x-forwarded-host") ||
+    request.headers.get("host") ||
+    request.nextUrl.host;
   return `${proto}://${host}`.replace(/\/$/, "");
 }
 
-function getOAuthRedirectUri(request) {
-  if (process.env.SLACK_REDIRECT_URI) {
-    return process.env.SLACK_REDIRECT_URI.replace(/\/$/, "");
+/**
+ * Must match a Redirect URL saved on the Slack app (https ngrok in local/dev).
+ * Do not send localhost here unless that URI is also registered in Slack.
+ */
+function getSlackRedirectUri() {
+  const explicit = process.env.SLACK_REDIRECT_URI?.trim();
+  if (explicit) return explicit.replace(/\/$/, "");
+
+  const origin = (
+    process.env.NEXT_PUBLIC_SLACK_OAUTH_ORIGIN ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    ""
+  ).replace(/\/$/, "");
+  return origin ? `${origin}/api/slack/auth` : "";
+}
+
+function allowedReturnOrigins() {
+  const origins = new Set(["http://localhost:3000", "http://127.0.0.1:3000"]);
+  for (const raw of [
+    process.env.NEXT_PUBLIC_APP_URL,
+    process.env.NEXT_PUBLIC_SLACK_OAUTH_ORIGIN,
+    process.env.SLACK_REDIRECT_URI,
+  ]) {
+    if (!raw) continue;
+    try {
+      const href = raw.includes("://") ? raw : `https://${raw}`;
+      origins.add(new URL(href).origin);
+    } catch {
+      // ignore malformed env
+    }
   }
-  return `${getAppBaseUrl(request)}/api/slack/auth`;
+  return origins;
+}
+
+function encodeOAuthState(returnOrigin) {
+  return Buffer.from(JSON.stringify({ returnOrigin }), "utf8").toString(
+    "base64url"
+  );
+}
+
+function decodeOAuthState(state) {
+  if (!state) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(state, "base64url").toString("utf8"));
+    const origin = String(parsed?.returnOrigin || "").replace(/\/$/, "");
+    if (origin && allowedReturnOrigins().has(origin)) return origin;
+  } catch {
+    // ignore tampered state
+  }
+  return null;
+}
+
+function workspacesRedirect(origin, query) {
+  return `${origin}/sentinel/workspaces${query}`;
 }
 
 /**
@@ -34,12 +83,17 @@ export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const error = searchParams.get("error");
-  const baseUrl = getAppBaseUrl(request);
-  const redirectUri = getOAuthRedirectUri(request);
+  const requestOrigin = getRequestOrigin(request);
+  const redirectUri = getSlackRedirectUri() || `${requestOrigin}/api/slack/auth`;
+  const returnOrigin =
+    decodeOAuthState(searchParams.get("state")) || requestOrigin;
 
   if (error) {
     return NextResponse.redirect(
-      `${baseUrl}/sentinel/workspaces?error=${encodeURIComponent(error)}`
+      workspacesRedirect(
+        returnOrigin,
+        `?error=${encodeURIComponent(error)}`
+      )
     );
   }
 
@@ -71,6 +125,7 @@ export async function GET(request) {
     authorizeUrl.searchParams.set("client_id", clientId);
     authorizeUrl.searchParams.set("scope", scopes);
     authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+    authorizeUrl.searchParams.set("state", encodeOAuthState(requestOrigin));
 
     return NextResponse.redirect(authorizeUrl.toString());
   }
@@ -94,7 +149,7 @@ export async function GET(request) {
     if (!data.ok) {
       console.error("[Slack OAuth] oauth.v2.access failed:", data.error);
       return NextResponse.redirect(
-        `${baseUrl}/sentinel/workspaces?error=${encodeURIComponent(data.error || "oauth_failed")}`
+        `${returnOrigin}/sentinel/workspaces?error=${encodeURIComponent(data.error || "oauth_failed")}`
       );
     }
 
@@ -104,7 +159,7 @@ export async function GET(request) {
 
     if (!teamId || !botAccessToken) {
       return NextResponse.redirect(
-        `${baseUrl}/sentinel/workspaces?error=missing_team_or_token`
+        `${returnOrigin}/sentinel/workspaces?error=missing_team_or_token`
       );
     }
 
@@ -118,7 +173,7 @@ export async function GET(request) {
         authTest.error || "team_id_mismatch"
       );
       return NextResponse.redirect(
-        `${baseUrl}/sentinel/workspaces?error=${encodeURIComponent(
+        `${returnOrigin}/sentinel/workspaces?error=${encodeURIComponent(
           authTest.error || "token_team_mismatch"
         )}`
       );
@@ -155,12 +210,12 @@ export async function GET(request) {
     });
 
     return NextResponse.redirect(
-      `${baseUrl}/sentinel/workspaces?connected=${encodeURIComponent(teamId)}`
+      `${returnOrigin}/sentinel/workspaces?connected=${encodeURIComponent(teamId)}`
     );
   } catch (err) {
     console.error("[Slack OAuth] unexpected error:", err?.message || err);
     return NextResponse.redirect(
-      `${baseUrl}/sentinel/workspaces?error=server_error`
+      `${returnOrigin}/sentinel/workspaces?error=server_error`
     );
   }
 }

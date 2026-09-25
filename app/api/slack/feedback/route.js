@@ -1,12 +1,11 @@
 import mongoose from "mongoose";
 import { NextResponse } from "next/server";
-import { connectDB } from "@/lib/db";
-import Alert from "@/lib/models/Alert";
 import { AIServiceError } from "@/lib/services/aiService";
 import {
   normalizeOverride,
   saveFeedback,
 } from "@/lib/services/feedbackService";
+import { applyUserClassificationCorrection } from "@/lib/services/escalationService";
 import { broadcastAlert, toAlertWireShape } from "@/lib/sentinel/alertBroadcast";
 
 export const dynamic = "force-dynamic";
@@ -58,24 +57,18 @@ export async function POST(request) {
     let alertPayload = null;
 
     if (alertId && mongoose.Types.ObjectId.isValid(alertId)) {
-      await connectDB();
-      const updated = await Alert.findOneAndUpdate(
-        { _id: alertId, teamId },
-        {
-          classification: override,
-          reasoning,
-          correctedAt: new Date(),
-          triageSource: "exact",
-          similarityScores: null,
-        },
-        { new: true }
-      );
+      const updated = await applyUserClassificationCorrection({
+        alertId,
+        teamId,
+        classification: override,
+        reasoning,
+      });
 
       if (!updated) {
         return NextResponse.json({ error: "Alert not found." }, { status: 404 });
       }
 
-      alertPayload = toAlertWireShape(updated);
+      alertPayload = toAlertWireShape(updated, { eventKind: "alert_update" });
       broadcastAlert(alertPayload);
     }
 
@@ -85,6 +78,9 @@ export async function POST(request) {
         textHash: feedbackDoc.textHash,
         teamId: feedbackDoc.teamId,
         userOverride: feedbackDoc.userOverride,
+        embeddingDimensions: Array.isArray(feedbackDoc.embedding)
+          ? feedbackDoc.embedding.length
+          : 0,
       },
       alert: alertPayload,
     });

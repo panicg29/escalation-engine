@@ -72,16 +72,10 @@ export function WorkspaceProvider({ children }) {
   }, []);
 
   const connectWorkspace = useCallback(() => {
-    // Prefer public ngrok origin for OAuth start so redirect_uri stays https.
-    // If ngrok shows the free "Visit Site" page on return, click it once — the
-    // ?code= query is preserved and Connect will finish.
-    const oauthOrigin = process.env.NEXT_PUBLIC_SLACK_OAUTH_ORIGIN?.replace(
-      /\/$/,
-      ""
-    );
-    window.location.href = oauthOrigin
-      ? `${oauthOrigin}/api/slack/auth`
-      : "/api/slack/auth";
+    // Stay on the origin the user is already viewing (localhost or ngrok).
+    // Sending the browser to a different ngrok host shows the free "Visit Site"
+    // interstitial and can drop the Slack OAuth round-trip.
+    window.location.assign("/api/slack/auth");
   }, []);
 
   const activeWorkspace = useMemo(

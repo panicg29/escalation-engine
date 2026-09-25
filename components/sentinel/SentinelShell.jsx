@@ -1,34 +1,60 @@
 "use client";
 
-import { Sidebar } from "./Sidebar";
-import { ThemeToggle } from "./ThemeToggle";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
-export function SentinelShell({ children, title, subtitle }) {
+export function SentinelShell({
+  children,
+  title,
+  subtitle,
+  showWorkspace = true,
+  titleClassName = "",
+  subtitleClassName = "",
+  bareBackground = false,
+  headerClassName = "",
+}) {
   return (
-    <div className="flex min-h-screen">
-      <div className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(139,92,246,0.05),transparent)] dark:bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(139,92,246,0.12),transparent)]" />
+    <div className="min-h-screen pt-20">
+      {!bareBackground && (
+        <div className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(139,92,246,0.05),transparent)] dark:bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(139,92,246,0.12),transparent)]" />
+      )}
 
-      <div className="flex w-full flex-col lg:flex-row">
-        <Sidebar />
-        <main className="flex-1 overflow-x-hidden">
-          {(title || subtitle) && (
-            <header className="sentinel-divider flex items-start justify-between gap-4 border-b px-6 py-6 lg:px-8">
+      <main>
+        {(title || subtitle) && (
+          <header
+            className={`sentinel-divider border-b px-6 py-6 lg:px-8 ${headerClassName}`.trim()}
+          >
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 {title && (
-                  <h1 className="sentinel-text-primary text-xl font-semibold tracking-tight">
+                  <h1
+                    className={
+                      titleClassName ||
+                      "sentinel-text-primary text-xl font-semibold tracking-tight"
+                    }
+                  >
                     {title}
                   </h1>
                 )}
                 {subtitle && (
-                  <p className="sentinel-text-muted mt-1 text-sm">{subtitle}</p>
+                  <p
+                    className={
+                      subtitleClassName || "sentinel-text-muted mt-1 text-sm"
+                    }
+                  >
+                    {subtitle}
+                  </p>
                 )}
               </div>
-              <ThemeToggle />
-            </header>
-          )}
-          <div className="px-6 py-6 lg:px-8 lg:py-8">{children}</div>
-        </main>
-      </div>
+              {showWorkspace && (
+                <div className="w-full max-w-xs lg:w-64">
+                  <WorkspaceSwitcher compact />
+                </div>
+              )}
+            </div>
+          </header>
+        )}
+        <div className="px-6 py-6 lg:px-8 lg:py-8">{children}</div>
+      </main>
     </div>
   );
 }

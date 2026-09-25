@@ -13,15 +13,24 @@ import { generateEmbedding } from "@/lib/services/embeddingService";
 import {
   buildDynamicSystemPrompt,
   findExactFeedback,
+  findNearDuplicateFeedback,
   findSimilarFeedback,
 } from "@/lib/services/feedbackService";
-import { hashText, normalizeForEmbedding } from "@/lib/services/textNormalize";
+import { hashText, feedbackMatchScore, normalizeForEmbedding, normalizeForFeedback } from "@/lib/services/textNormalize";
 import {
   handleReactionAdded,
   handleThreadReply,
   scheduleEscalation,
   evaluateEscalationTimer,
 } from "@/lib/services/escalationService";
+import {
+  applyRulesOverride,
+  getAiSensitivityConfig,
+  getCustomRules,
+  shouldApplyAfterHoursBoost,
+  isVipUser,
+  getEscalationTimeout,
+} from "@/lib/services/rulesService";
 import { extractMentionedUserIds, hasBroadcastMention } from "@/lib/slack/extractTargetUser";
 import { formatSlackMessageDisplay } from "@/lib/slack/formatMessageDisplay";
 import { resolveWorkspaceForTeam, isWorkspaceActiveForEvents, getEscalationTargetFromWorkspace } from "@/lib/services/workspaceService";
@@ -93,7 +102,7 @@ const SEMANTIC_FEEDBACK_ENABLED =
 
 const SEMANTIC_EMBEDDING_TIMEOUT_MS = Math.max(
   250,
-  Number.parseInt(process.env.SEMANTIC_EMBEDDING_TIMEOUT_MS || "1400", 10) || 1400
+  Number.parseInt(process.env.SEMANTIC_EMBEDDING_TIMEOUT_MS || "8000", 10) || 8000
 );
 
 // Above this cosine score, reuse the matched feedback label instead of asking
@@ -101,7 +110,7 @@ const SEMANTIC_EMBEDDING_TIMEOUT_MS = Math.max(
 const SEMANTIC_OVERRIDE_THRESHOLD = Math.min(
   0.99,
   Math.max(
-    0.55,
+    0.5,
     Number.parseFloat(process.env.SEMANTIC_OVERRIDE_THRESHOLD || "0.70") || 0.7
   )
 );
@@ -128,38 +137,118 @@ async function raceWithTimeout(promise, ms, fallbackValue) {
  * 3) Weaker semantic match → LLM + few-shot from prior feedback
  * 4) No match → direct LLM
  */
-async function runTieredTriage(text, timeContext, teamId, trackingId = null) {
-  const textHash = hashText(text);
-  const exact = await findExactFeedback(text, teamId);
+async function runTieredTriage(text, timeContext, teamId, trackingId = null, { skipExact = false } = {}) {
+  // Get AI sensitivity config and custom rules for this team
+  const [aiConfig, customRulesText] = await Promise.all([
+    getAiSensitivityConfig(teamId),
+    getCustomRules(teamId)
+  ]);
 
-  if (exact) {
+  // Apply after-hours boost if configured
+  let adjustedTimeContext = timeContext;
+  if (await shouldApplyAfterHoursBoost(teamId) && timeContext === "After Hours") {
+    adjustedTimeContext = "After Hours (Boosted Sensitivity)";
+  }
+  const textHash = hashText(text);
+  if (!skipExact) {
+    const exact = await findExactFeedback(text, teamId);
+
+    if (exact) {
+      return {
+        classification: exact.userOverride,
+        reasoning:
+          exact.userReasoning?.trim() ||
+          `Exact match from user correction (${exact.userOverride}).`,
+        triageSource: "exact",
+        textHash,
+        similarityMatches: null,
+        topSimilarityScore: null,
+        fallback: false,
+        triageDebug: {
+          tier: 1,
+          tierLabel: "Tier 1 — Exact hash match",
+          triageSource: "exact",
+          teamId,
+          textHash,
+          llmSkipped: true,
+          model: null,
+          llmRequest: null,
+          matchedFeedback: {
+            originalText: exact.originalText,
+            userOverride: exact.userOverride,
+            userReasoning: exact.userReasoning || "",
+          },
+          similarityScores: null,
+        },
+      };
+    }
+  }
+
+  const nearDup = await findNearDuplicateFeedback(text, teamId);
+  if (nearDup && !nearDup.belowThreshold && nearDup.userOverride) {
+    const overlapPct = Math.round(Number(nearDup.similarity) * 100);
+    console.log(
+      JSON.stringify({
+        source: "slack-events",
+        action: "lexical_override",
+        teamId,
+        textHash,
+        overlap: Number(nearDup.similarity.toFixed(4)),
+        matchedText: nearDup.originalText,
+        userOverride: nearDup.userOverride,
+      })
+    );
     return {
-      classification: exact.userOverride,
+      classification: nearDup.userOverride,
       reasoning:
-        exact.userReasoning?.trim() ||
-        `Exact match from user correction (${exact.userOverride}).`,
-      triageSource: "exact",
+        nearDup.userReasoning?.trim() ||
+        `Close match to prior feedback (${overlapPct}% wording overlap) labeled ${nearDup.userOverride}.`,
+      triageSource: "semantic",
       textHash,
-      similarityMatches: null,
-      topSimilarityScore: null,
+      similarityMatches: [
+        {
+          textHash: nearDup.textHash,
+          score: Number(nearDup.similarity.toFixed(4)),
+          userOverride: nearDup.userOverride,
+          originalText: nearDup.originalText,
+        },
+      ],
+      topSimilarityScore: Number(nearDup.similarity.toFixed(4)),
       fallback: false,
       triageDebug: {
-        tier: 1,
-        tierLabel: "Tier 1 — Exact hash match",
-        triageSource: "exact",
+        tier: 2,
+        tierLabel: "Tier 2 — Lexical near-duplicate override",
+        triageSource: "semantic",
         teamId,
         textHash,
         llmSkipped: true,
         model: null,
         llmRequest: null,
         matchedFeedback: {
-          originalText: exact.originalText,
-          userOverride: exact.userOverride,
-          userReasoning: exact.userReasoning || "",
+          originalText: nearDup.originalText,
+          userOverride: nearDup.userOverride,
+          userReasoning: nearDup.userReasoning || "",
+          similarity: Number(nearDup.similarity.toFixed(4)),
         },
-        similarityScores: null,
+        semanticAutoApplied: true,
+        matchKind: "lexical",
       },
     };
+  }
+
+  if (nearDup?.belowThreshold) {
+    console.log(
+      JSON.stringify({
+        source: "slack-events",
+        action: "lexical_below_threshold",
+        teamId,
+        textHash,
+        overlap: Number(nearDup.similarity.toFixed(4)),
+        threshold: 0.7,
+        matchedText: nearDup.originalText,
+        userOverride: nearDup.userOverride,
+      })
+    );
   }
 
   let similar = [];
@@ -216,32 +305,98 @@ async function runTieredTriage(text, timeContext, teamId, trackingId = null) {
     }
 
     if (similar.length > 0) {
-      const top = similar[0];
-      const topScore = Number(top.similarity) || 0;
-      const similarityMatches = similar.map((s) => ({
+      console.log(
+        JSON.stringify({
+          source: "slack-events",
+          action: "semantic_candidates",
+          teamId,
+          textHash,
+          matches: similar.slice(0, 5).map((s) => ({
+            score: Number((Number(s.similarity) || 0).toFixed(4)),
+            userOverride: s.userOverride,
+            originalText: s.originalText,
+          })),
+        })
+      );
+      const ranked = similar
+        .map((s) => {
+          const cosine = Number(s.similarity) || 0;
+          const wording = feedbackMatchScore(text, s.originalText);
+          return { ...s, cosine, wording };
+        })
+        .sort((a, b) => b.cosine - a.cosine || b.wording - a.wording);
+      const top = ranked[0];
+      const eligible = ranked.filter(
+        (s) =>
+          s.cosine >= SEMANTIC_OVERRIDE_THRESHOLD ||
+          s.wording >= SEMANTIC_OVERRIDE_THRESHOLD ||
+          (s.cosine >= 0.4 && s.wording >= 0.5)
+      );
+      const chosen = eligible.sort(
+        (a, b) =>
+          Math.max(b.cosine, b.wording) - Math.max(a.cosine, a.wording)
+      )[0] || null;
+      const semanticHit = Boolean(chosen && chosen.cosine >= chosen.wording);
+      const similarityMatches = ranked.map((s) => ({
         textHash: s.textHash,
-        score: Number(s.similarity.toFixed(4)),
+        score: Number(s.cosine.toFixed(4)),
         userOverride: s.userOverride,
         originalText: s.originalText,
       }));
       const scoreSummary = similarityMatches;
+      const sameNormalizedText =
+        normalizeForFeedback(top.originalText) === normalizeForFeedback(text);
 
-      // Strong close-match: reuse human override. Fine-tuned 1.5B often
-      // ignores soft few-shot, so high-similarity corrections must be authoritative.
-      if (topScore >= SEMANTIC_OVERRIDE_THRESHOLD && top.userOverride) {
+      // Identical (or hash-missed duplicate) text is an exact correction, not a "close match".
+      if (sameNormalizedText && top.userOverride) {
         return {
           classification: top.userOverride,
           reasoning:
             top.userReasoning?.trim() ||
-            `Close match to prior feedback (${(topScore * 100).toFixed(0)}% similar) labeled ${top.userOverride}.`,
-          triageSource: "semantic",
+            `Exact match from user correction (${top.userOverride}).`,
+          triageSource: "exact",
           textHash,
           similarityMatches,
           topSimilarityScore: topSimilarityScore(similar),
           fallback: false,
           triageDebug: {
+            tier: 1,
+            tierLabel: "Tier 1 — Exact text match (normalized)",
+            triageSource: "exact",
+            teamId,
+            textHash,
+            llmSkipped: true,
+            model: null,
+            llmRequest: null,
+            matchedFeedback: {
+              originalText: top.originalText,
+              userOverride: top.userOverride,
+              userReasoning: top.userReasoning || "",
+            },
+            similarityScores: scoreSummary,
+          },
+        };
+      }
+
+      // Strong close-match: reuse human override. Fine-tuned 1.5B often
+      // ignores soft few-shot, so high-similarity corrections must be authoritative.
+      if (chosen?.userOverride) {
+        const applyScore = semanticHit ? chosen.cosine : chosen.wording;
+        return {
+          classification: chosen.userOverride,
+          reasoning:
+            chosen.userReasoning?.trim() ||
+            `Close match to prior feedback (${(applyScore * 100).toFixed(0)}% similar) labeled ${chosen.userOverride}.`,
+          triageSource: "semantic",
+          textHash,
+          similarityMatches,
+          topSimilarityScore: Number(applyScore.toFixed(4)),
+          fallback: false,
+          triageDebug: {
             tier: 2,
-            tierLabel: "Tier 2 — Semantic override (high confidence)",
+            tierLabel: semanticHit
+              ? "Tier 2 — Semantic embedding override"
+              : "Tier 2 — Order-independent wording override",
             triageSource: "semantic",
             teamId,
             textHash,
@@ -251,24 +406,32 @@ async function runTieredTriage(text, timeContext, teamId, trackingId = null) {
             fewShotExampleCount: similar.length,
             similarityScores: scoreSummary,
             matchedFeedback: {
-              originalText: top.originalText,
-              userOverride: top.userOverride,
-              userReasoning: top.userReasoning || "",
-              similarity: Number(topScore.toFixed(4)),
+              originalText: chosen.originalText,
+              userOverride: chosen.userOverride,
+              userReasoning: chosen.userReasoning || "",
+              similarity: Number(applyScore.toFixed(4)),
             },
             systemPromptIncludesFewShot: false,
             semanticAutoApplied: true,
+            matchedOverride: chosen.userOverride,
             semanticOverrideThreshold: SEMANTIC_OVERRIDE_THRESHOLD,
           },
         };
       }
 
-      const systemPrompt = buildDynamicSystemPrompt(similar);
-      const llmRequest = getTriageRequestPayload(text, timeContext, systemPrompt);
+      let systemPrompt = buildDynamicSystemPrompt(similar);
+      
+      // Append custom rules to system prompt if configured
+      if (customRulesText?.trim()) {
+        systemPrompt += `\n\nADDITIONAL TEAM-SPECIFIC RULES:\n${customRulesText.trim()}`;
+      }
+
+      const llmRequest = getTriageRequestPayload(text, adjustedTimeContext, systemPrompt);
       if (trackingId) addPerformanceEvent(trackingId, PERF_EVENTS.LLM_START);
-      const result = await triageMessage(text, timeContext, {
+      const result = await triageMessage(text, adjustedTimeContext, {
         systemPrompt,
         fewShotExamples: similar,
+        aiConfig, // Pass AI config for threshold adjustments
       });
       if (trackingId) {
         addPerformanceEvent(trackingId, PERF_EVENTS.LLM_COMPLETE, {
@@ -279,7 +442,7 @@ async function runTieredTriage(text, timeContext, teamId, trackingId = null) {
       return {
         classification: result.classification,
         reasoning: result.reasoning,
-        triageSource: result.fallback ? "llm" : "semantic",
+        triageSource: "llm",
         textHash,
         similarityMatches,
         topSimilarityScore: topSimilarityScore(similar),
@@ -287,7 +450,7 @@ async function runTieredTriage(text, timeContext, teamId, trackingId = null) {
         triageDebug: {
           tier: 2,
           tierLabel: "Tier 2 — Semantic few-shot + LLM",
-          triageSource: result.fallback ? "llm" : "semantic",
+          triageSource: "llm",
           teamId,
           textHash,
           llmSkipped: false,
@@ -297,14 +460,24 @@ async function runTieredTriage(text, timeContext, teamId, trackingId = null) {
           similarityScores: scoreSummary,
           systemPromptIncludesFewShot: true,
           semanticAutoApplied: false,
+          matchedOverride: ranked[0]?.userOverride || null,
         },
       };
     }
   }
 
-  const llmRequest = getTriageRequestPayload(text, timeContext, TRIAGE_SYSTEM_PROMPT);
+  // Build system prompt with custom rules
+  let systemPrompt = TRIAGE_SYSTEM_PROMPT;
+  if (customRulesText?.trim()) {
+    systemPrompt += `\n\nADDITIONAL TEAM-SPECIFIC RULES:\n${customRulesText.trim()}`;
+  }
+
+  const llmRequest = getTriageRequestPayload(text, adjustedTimeContext, systemPrompt);
   if (trackingId) addPerformanceEvent(trackingId, PERF_EVENTS.LLM_START);
-  const result = await triageMessage(text, timeContext);
+  const result = await triageMessage(text, adjustedTimeContext, {
+    systemPrompt,
+    aiConfig, // Pass AI config for threshold adjustments
+  });
   if (trackingId) {
     addPerformanceEvent(trackingId, PERF_EVENTS.LLM_COMPLETE, {
       classification: result.classification,
@@ -341,6 +514,123 @@ async function runTieredTriage(text, timeContext, teamId, trackingId = null) {
   };
 }
 
+async function persistClassifiedSlackAlert({
+  teamId,
+  userId,
+  text,
+  event,
+  botToken,
+  slackMessageTs,
+  slackChannelId,
+  workspace,
+  classification,
+  reasoning,
+  triageSource,
+  timerDecision,
+  triageDebug,
+}) {
+  const userName = await resolveSlackUserName(userId, event, { teamId, botToken }).catch(
+    () => "Unknown user"
+  );
+  const displayText = await formatSlackMessageDisplay(text, { teamId, botToken }).catch(
+    () => text
+  );
+  const { targetUserId: workspaceTargetUserId, targetUserName: workspaceTargetUserName } =
+    getEscalationTargetFromWorkspace(workspace);
+  const alertMentionedUserIds = extractMentionedUserIds(text);
+
+  const finalClassification = timerDecision.classification;
+  const finalReasoning = timerDecision.reasoningSuffix
+    ? `${reasoning}${timerDecision.reasoningSuffix}`.trim()
+    : reasoning;
+  const status = timerDecision.timerApplies ? "pending" : "resolved";
+  const escalationTimeoutMs = status === "pending" ? await getEscalationTimeout(teamId) : null;
+
+  await connectDB();
+  if (slackMessageTs) {
+    const existing = await Alert.findOne({ teamId, slackMessageTs }).lean();
+    if (existing) {
+      console.log(
+        JSON.stringify({
+          source: "slack-events",
+          action: "duplicate_message_skipped",
+          teamId,
+          slackMessageTs,
+          alertId: String(existing._id),
+          status: existing.status,
+        })
+      );
+      return { doc: existing, status: existing.status, duplicate: true };
+    }
+  }
+
+  const doc = await Alert.create({
+    teamId,
+    userId,
+    userName,
+    text,
+    displayText,
+    classification: finalClassification,
+    reasoning: finalReasoning,
+    triageSource,
+    semanticAutoApplied: triageSource === "exact" || triageSource === "semantic",
+    matchedOverride: classification,
+    slackMessageTs: slackMessageTs || null,
+    slackChannelId: slackChannelId || null,
+    targetUserId: workspaceTargetUserId || null,
+    targetUserName: workspaceTargetUserName || null,
+    mentionedUserIds: alertMentionedUserIds,
+    timerTrigger: timerDecision.trigger,
+    escalationTimeoutMs,
+    status,
+    timestamp: new Date(),
+  });
+
+  const alert = toAlertWireShape(doc, {
+    triageDebug,
+    eventKind: "alert",
+  });
+  broadcastAlert(alert);
+
+  if (status === "pending" && slackMessageTs) {
+    void scheduleEscalation({
+      alertId: doc._id,
+      teamId,
+      channelId: slackChannelId,
+      botToken,
+    });
+  }
+
+  return { doc, status };
+}
+
+function timerDecisionForExactFeedback({
+  userOverride,
+  slackMessageTs,
+  workspaceTargetUserId,
+  mentionedUserIds,
+  text,
+}) {
+  if (userOverride === "Escalate") {
+    return {
+      timerApplies: Boolean(slackMessageTs && workspaceTargetUserId),
+      classification: "Escalate",
+      trigger: "feedback_exact",
+      reasoningSuffix: workspaceTargetUserId
+        ? " Escalation timer started from stored correction."
+        : " Configure a workspace notification target to start escalation timers.",
+    };
+  }
+
+  return evaluateEscalationTimer({
+    classification: userOverride,
+    slackMessageTs,
+    workspaceTargetUserId,
+    mentionedUserIds,
+    text,
+  });
+}
+
 async function triageSlackMessage({
   userId,
   text,
@@ -355,11 +645,169 @@ async function triageSlackMessage({
   const trackingId = `slack-${teamId}-${slackMessageTs}`;
   startPerformanceTracking(trackingId, PERF_EVENTS.SLACK_RECEIVED);
   addPerformanceEvent(trackingId, PERF_EVENTS.TRIAGE_START);
-  
-  // Run independent async operations in parallel for better performance
-  const timeContext = getTimeContext();
+
+  const isBot = Boolean(event.bot_id || event.bot_profile?.id);
   const { targetUserId: workspaceTargetUserId, targetUserName: workspaceTargetUserName } =
     getEscalationTargetFromWorkspace(workspace);
+  const slackMentionedUserIds = extractMentionedUserIds(text);
+
+  if (await isVipUser(teamId, userId)) {
+    const rulesOverride = {
+      classification: "Escalate",
+      reason: "VIP user — instant escalation",
+      bypassMentionChecks: true,
+      timerTrigger: "vip_sender",
+    };
+    console.log(
+      JSON.stringify({
+        source: "slack-events",
+        action: "rules_override_applied",
+        teamId,
+        userId,
+        channelId: slackChannelId,
+        classification: rulesOverride.classification,
+        reason: rulesOverride.reason,
+        slackMessageTs,
+      })
+    );
+
+    const timerDecision = {
+      timerApplies: Boolean(slackMessageTs && workspaceTargetUserId),
+      classification: "Escalate",
+      trigger: rulesOverride.timerTrigger,
+      reasoningSuffix: workspaceTargetUserId
+        ? " Escalation timer started for VIP sender."
+        : " Configure a workspace notification target to start escalation timers.",
+    };
+
+    await persistClassifiedSlackAlert({
+      teamId,
+      userId,
+      text,
+      event,
+      botToken,
+      slackMessageTs,
+      slackChannelId,
+      workspace,
+      classification: "Escalate",
+      reasoning: rulesOverride.reason,
+      triageSource: "rules",
+      timerDecision,
+      triageDebug: {
+        tier: 0,
+        tierLabel: "Tier 0 — Rules override",
+        triageSource: "rules",
+        rulesOverride: {
+          reason: rulesOverride.reason,
+          classification: rulesOverride.classification,
+        },
+      },
+    });
+    completePerformanceTracking(trackingId, PERF_EVENTS.RULES_OVERRIDE);
+    return;
+  }
+
+  const exact = await findExactFeedback(text, teamId);
+  if (exact) {
+    const timerDecision = timerDecisionForExactFeedback({
+      userOverride: exact.userOverride,
+      slackMessageTs,
+      workspaceTargetUserId,
+      mentionedUserIds: slackMentionedUserIds,
+      text,
+    });
+    const reasoning =
+      exact.userReasoning?.trim() ||
+      `Exact match from user correction (${exact.userOverride}).`;
+
+    await persistClassifiedSlackAlert({
+      teamId,
+      userId,
+      text,
+      event,
+      botToken,
+      slackMessageTs,
+      slackChannelId,
+      workspace,
+      classification: exact.userOverride,
+      reasoning,
+      triageSource: persistTriageSource("exact"),
+      timerDecision,
+      triageDebug: {
+        tier: 1,
+        tierLabel: "Tier 1 — Exact hash match",
+        triageSource: "exact",
+        matchedFeedback: {
+          originalText: exact.originalText,
+          userOverride: exact.userOverride,
+          userReasoning: exact.userReasoning || "",
+        },
+      },
+    });
+    completePerformanceTracking(trackingId, PERF_EVENTS.TRIAGE_COMPLETE);
+    return;
+  }
+
+  const rulesOverride = await applyRulesOverride(
+    teamId,
+    userId,
+    slackChannelId,
+    text,
+    isBot,
+    { includeVip: false }
+  );
+
+  if (rulesOverride.shouldOverride) {
+    console.log(
+      JSON.stringify({
+        source: "slack-events",
+        action: "rules_override_applied",
+        teamId,
+        userId,
+        channelId: slackChannelId,
+        classification: rulesOverride.classification,
+        reason: rulesOverride.reason,
+        slackMessageTs,
+      })
+    );
+
+    const timerDecision = evaluateEscalationTimer({
+      classification: rulesOverride.classification,
+      slackMessageTs,
+      workspaceTargetUserId,
+      mentionedUserIds: slackMentionedUserIds,
+      text,
+    });
+
+    await persistClassifiedSlackAlert({
+      teamId,
+      userId,
+      text,
+      event,
+      botToken,
+      slackMessageTs,
+      slackChannelId,
+      workspace,
+      classification: rulesOverride.classification,
+      reasoning: rulesOverride.reason,
+      triageSource: "rules",
+      timerDecision,
+      triageDebug: {
+        tier: 0,
+        tierLabel: "Tier 0 — Rules override",
+        triageSource: "rules",
+        rulesOverride: {
+          reason: rulesOverride.reason,
+          classification: rulesOverride.classification,
+        },
+      },
+    });
+    completePerformanceTracking(trackingId, PERF_EVENTS.RULES_OVERRIDE);
+    return;
+  }
+
+  // Run independent async operations in parallel for better performance
+  const timeContext = getTimeContext();
 
   // Instant pipeline UI: show the run before LLM / embeddings finish.
   const provisionalId = `pending-${teamId}-${slackMessageTs || Date.now()}`;
@@ -378,7 +826,7 @@ async function triageSlackMessage({
     slackChannelId: slackChannelId || null,
     targetUserId: workspaceTargetUserId || null,
     targetUserName: workspaceTargetUserName || null,
-    mentionedUserIds: extractMentionedUserIds(text),
+    mentionedUserIds: slackMentionedUserIds,
     timerTrigger: null,
     status: "analyzing",
     timestamp: new Date().toISOString(),
@@ -389,7 +837,7 @@ async function triageSlackMessage({
   const [userName, displayText, result] = await Promise.all([
     resolveSlackUserName(userId, event, { teamId, botToken }),
     formatSlackMessageDisplay(text, { teamId, botToken }),
-    runTieredTriage(text, timeContext, teamId, trackingId),
+    runTieredTriage(text, timeContext, teamId, trackingId, { skipExact: true }),
   ]);
   
   addPerformanceEvent(trackingId, PERF_EVENTS.TRIAGE_COMPLETE, {
@@ -398,12 +846,11 @@ async function triageSlackMessage({
   });
   
   // These operations depend on the results above, so run them after
-  const mentionedUserIds = extractMentionedUserIds(text);
   const timerDecision = evaluateEscalationTimer({
     classification: result.classification,
     slackMessageTs,
     workspaceTargetUserId,
-    mentionedUserIds,
+    mentionedUserIds: slackMentionedUserIds,
     text,
   });
 
@@ -414,6 +861,7 @@ async function triageSlackMessage({
     : result.reasoning;
 
   const status = timerApplies ? "pending" : "resolved";
+  const escalationTimeoutMs = status === "pending" ? await getEscalationTimeout(teamId) : null;
 
   await connectDB();
   addPerformanceEvent(trackingId, PERF_EVENTS.DB_SAVE_START);
@@ -445,12 +893,15 @@ async function triageSlackMessage({
     reasoning: finalReasoning,
     triageSource: persistTriageSource(result.triageSource),
     similarityScores: result.topSimilarityScore,
+    semanticAutoApplied: Boolean(result.triageDebug?.semanticAutoApplied),
+    matchedOverride: result.triageDebug?.matchedOverride || result.triageDebug?.matchedFeedback?.userOverride || null,
     slackMessageTs: slackMessageTs || null,
     slackChannelId: slackChannelId || null,
     targetUserId: workspaceTargetUserId || null,
     targetUserName: workspaceTargetUserName || null,
-    mentionedUserIds,
+    mentionedUserIds: slackMentionedUserIds,
     timerTrigger: timerDecision.trigger,
+    escalationTimeoutMs,
     status,
     timestamp: new Date(),
   });
@@ -508,7 +959,7 @@ async function triageSlackMessage({
         teamId,
         alertId: String(doc._id),
         slackMessageTs,
-        mentionedUserIds,
+        mentionedUserIds: slackMentionedUserIds,
         workspaceTargetUserId,
       })
     );
@@ -532,7 +983,7 @@ async function triageSlackMessage({
         slackMessageTs,
         targetUserId: alert.targetUserId,
         targetUserName: alert.targetUserName,
-        mentionedUserIds,
+        mentionedUserIds: slackMentionedUserIds,
         timerTrigger: timerDecision.trigger,
         status,
       },

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { AIServiceError } from "@/lib/services/aiService";
 import {
+  clearFeedbackForTeam,
   listFeedback,
   normalizeOverride,
   saveFeedback,
@@ -27,9 +28,18 @@ export async function GET(request) {
   const scoped = requireTeamId(request);
   if (scoped.error) return scoped.error;
 
+  const { searchParams } = new URL(request.url);
+  const pageRaw = Number.parseInt(searchParams.get("page") || "1", 10);
+  const limitRaw = Number.parseInt(searchParams.get("limit") || "20", 10);
+  const userOverride = searchParams.get("userOverride");
+
   try {
-    const feedback = await listFeedback(scoped.teamId);
-    return NextResponse.json({ teamId: scoped.teamId, feedback });
+    const result = await listFeedback(scoped.teamId, {
+      page: pageRaw,
+      limit: limitRaw,
+      userOverride: userOverride || null,
+    });
+    return NextResponse.json({ teamId: scoped.teamId, ...result });
   } catch (error) {
     return NextResponse.json(
       { error: error?.message || "Failed to fetch feedback." },
@@ -85,6 +95,21 @@ export async function POST(request) {
 
     return NextResponse.json(
       { error: error?.message || "Failed to save feedback." },
+      { status: 500 }
+    );
+  }
+}
+
+export async function DELETE(request) {
+  const scoped = requireTeamId(request);
+  if (scoped.error) return scoped.error;
+
+  try {
+    const deletedCount = await clearFeedbackForTeam(scoped.teamId);
+    return NextResponse.json({ ok: true, teamId: scoped.teamId, deletedCount });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error?.message || "Failed to clear feedback." },
       { status: 500 }
     );
   }

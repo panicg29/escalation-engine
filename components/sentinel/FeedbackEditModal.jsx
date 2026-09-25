@@ -115,8 +115,8 @@ export function FeedbackEditModal({
         </h2>
         <p className="sentinel-text-muted mt-1 text-xs">
           {isCreate
-            ? "Create a new few-shot example for exact-match cache and semantic triage."
-            : "Changes re-embed the message when text is edited, keeping the triage pipeline in sync."}
+            ? "Create a few-shot example. Slack mentions like <@U123|maya> match @maya."
+            : "Text edits re-hash and re-embed when possible. Exact-match still works without a vector."}
         </p>
 
         <label className="mt-4 block">
@@ -128,7 +128,7 @@ export function FeedbackEditModal({
             onChange={(e) => setForm((prev) => ({ ...prev, originalText: e.target.value }))}
             disabled={busy}
             rows={3}
-            placeholder="The exact Slack message users might send…"
+            placeholder="The Slack message — @names or raw mention tokens both work"
             className="sentinel-input w-full resize-none rounded-lg px-3 py-2 text-sm"
           />
         </label>

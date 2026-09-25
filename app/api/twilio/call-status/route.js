@@ -56,8 +56,16 @@ export async function POST(request) {
       })
     );
 
-    // Reject SIP codes (486 busy, 603 decline, 403 often causes Twilio re-dial).
-    if (isRejectSipCode(sipResponseCode)) {
+    // Only hang up on a real busy/decline. 403 on initiated/ringing is often
+    // an intermediate SIP hop — canceling there drops the call before it rings.
+    if (
+      isRejectSipCode(sipResponseCode) &&
+      (callStatus === "busy" ||
+        callStatus === "failed" ||
+        callStatus === "canceled" ||
+        callStatus === "completed" ||
+        callStatus === "no-answer")
+    ) {
       await handleCallRejected({
         callSid,
         callStatus: callStatus || "busy",
@@ -76,8 +84,18 @@ export async function POST(request) {
       return twimlResponse();
     }
 
-    if (callStatus === "answered" || callStatus === "in-progress") {
-      markCallAnswered(callSid);
+    if (callStatus === "answered") {
+      // Only treat as pickup after the handset actually rang.
+      if ((global.callRingCounts.get(callSid) || 0) >= 1) {
+        markCallAnswered(callSid);
+      }
+      return twimlResponse();
+    }
+
+    if (callStatus === "in-progress") {
+      if ((global.callRingCounts.get(callSid) || 0) >= 1) {
+        markCallAnswered(callSid);
+      }
       return twimlResponse();
     }
 

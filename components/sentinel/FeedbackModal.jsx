@@ -83,7 +83,7 @@ export function FeedbackModal({ open, alert, onClose, onSuccess, teamId }) {
       >
         <h2 className="sentinel-text-primary text-sm font-semibold">Correct classification</h2>
         <p className="sentinel-text-muted mt-1 text-xs">
-          Your correction trains future triage via exact-match cache and semantic few-shot examples.
+          Your correction is stored immediately for exact repeats. Similar wording uses embeddings when available. Saving still works if embedding fails.
         </p>
 
         <div className="sentinel-card-inset mt-4 rounded-lg p-3">
